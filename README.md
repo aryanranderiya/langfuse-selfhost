@@ -80,9 +80,92 @@ lf = Langfuse(
     public_key="pk-lf-...",
     secret_key="sk-lf-...",
     host="https://langfuse.example.com",
+    environment="production",  # tag traces; filter in the UI
 )
 handler = CallbackHandler()  # use in LangChain / LangGraph callbacks
 ```
+
+Per-environment segregation in a single project is built in — pass
+`environment="development"` from your dev process, `"staging"` from
+staging, `"production"` from prod. The Langfuse UI exposes an
+environment filter on every dashboard and the traces list. Promoting to
+fully separate Langfuse projects per environment later is also a drop-in
+change (create the projects in the UI, swap API keys per env).
+
+## Verifying it works
+
+### 1. Health check
+
+```bash
+curl -fsS https://your-langfuse-url/api/public/health
+# {"status":"OK","version":"3.x.x"}
+```
+
+### 2. Confirm the bootstrap created the org / project / API keys
+
+```bash
+curl -fsS \
+  -u "pk-lf-...:sk-lf-..." \
+  "https://your-langfuse-url/api/public/projects"
+# {"data":[{"id":"default","name":"default","organization":{...}}]}
+```
+
+### 3. Send a trace end-to-end
+
+This exercises the full path — auth → ingestion → ClickHouse → trace
+API — without writing any application code:
+
+```bash
+uv run --with langfuse --with langchain-openai python - <<'PY'
+import os
+from langfuse import Langfuse
+from langfuse.langchain import CallbackHandler
+from langchain_openai import ChatOpenAI
+
+os.environ["LANGFUSE_HOST"] = "https://your-langfuse-url"
+os.environ["LANGFUSE_PUBLIC_KEY"] = "pk-lf-..."
+os.environ["LANGFUSE_SECRET_KEY"] = "sk-lf-..."
+
+lf = Langfuse(environment="development")
+ChatOpenAI(model="gpt-4o-mini", callbacks=[CallbackHandler()], max_tokens=20)\
+    .invoke("In exactly 5 words, say hi")
+lf.flush()
+print("trace flushed — check the Langfuse UI")
+PY
+```
+
+Within a few seconds the trace shows up in the UI:
+
+- Open `https://your-langfuse-url`, log in, pick your project
+- **Traces** in the sidebar — you'll see a `ChatOpenAI` row
+- Click it to see prompt, response, tokens, and timing
+- The **Environment** filter on the traces list confirms the
+  `development` tag was applied
+
+### 4. List recent traces via API
+
+```bash
+curl -fsS \
+  -u "pk-lf-...:sk-lf-..." \
+  "https://your-langfuse-url/api/public/traces?limit=3"
+```
+
+### 5. If a trace never lands
+
+```bash
+# stack healthy?
+docker compose ps
+
+# web container logs (most useful when something breaks)
+docker compose logs --tail 50 langfuse-web
+
+# worker logs (ingestion pipeline)
+docker compose logs --tail 50 langfuse-worker
+```
+
+A trace landing in `/api/public/traces` but not appearing in the UI
+usually means the UI is filtered to a different environment — clear
+the env filter on the traces list.
 
 ## Common operations
 
